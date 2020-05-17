@@ -443,30 +443,35 @@ class ForwardEmail {
     rootNode.setHeader('Auto-Submitted', 'auto-replied');
     rootNode.setHeader('Subject', 'Delivery Status Notification (Failure)');
 
-    const messageId = options.headers.getFirst('Message-ID');
-
-    if (messageId) {
-      rootNode.setHeader('In-Reply-To', messageId);
-      rootNode.setHeader('References', messageId);
+    if (options.messageId) {
+      rootNode.setHeader('In-Reply-To', options.messageId);
+      rootNode.setHeader('References', options.messageId);
     }
 
-    // TODO: text/html all fancy
-
     rootNode
-      .createChild('text/plain')
+      .createChild('text/plain; charset=utf-8')
       .setHeader('Content-Description', 'Notification')
       .setContent(
         [
           `Delivery to the following recipient failed permanently: ${options.bounce.address}`,
-          `Technical details of permanent failure: ${options.bounce.err.message}`
+          '',
+          'Technical details of permanent failure:',
+          '',
+          options.bounce.err.message
         ].join('\n')
       );
+
+    if (options.bounceHTML)
+      rootNode
+        .createChild('text/html; charset=utf-8')
+        .setHeader('Content-Description', 'Notification')
+        .setRaw(options.bounceHTML);
 
     rootNode
       .createChild('message/delivery-status')
       .setHeader('Content-Description', 'Delivery report')
       .setContent(
-        _.compact([
+        [
           `Reporting-MTA: dns; ${options.name}`,
           `X-ForwardEmail-Version: ${pkg.version}`,
           `X-ForwardEmail-Session-ID: ${options.id}`,
@@ -479,13 +484,10 @@ class ForwardEmail {
           `Status: 5.0.0`,
           `Remote-MTA: dns; ${options.bounce.host}`,
           `Diagnostic-Code: smtp; ${this.getDiagnosticCode(options.bounce.err)}`
-        ]).join('\n')
+        ].join('\n')
       );
 
-    rootNode
-      .createChild('text/rfc822-headers')
-      .setHeader('Content-Description', 'Undelivered Message Headers')
-      .setContent(options.headers.build());
+    rootNode.createChild('message/rfc822').setRaw(options.originalRaw);
 
     return rootNode.createReadStream();
   }
@@ -1479,6 +1481,27 @@ class ForwardEmail {
           // (will basically pick the first that was pushed to the list)
           //
           const uniqueBounces = _.uniqBy(bounces, 'address');
+
+          //
+          // get the latest bounce HTML from our API
+          // (which we'll then replace with the recipient's address and message)
+          //
+          let bounceHTML;
+          try {
+            const { body } = await superagent
+              .get(`${this.config.apiEndpoint}/v1/bounce-html`)
+              .set('Accept', 'json')
+              .set('User-Agent', `forward-email/${pkg.version}`)
+              .auth(this.config.apiSecrets[0])
+              .timeout(this.config.timeout)
+              .retry(this.config.retry)
+              .send();
+
+            if (_.isObject(body) && isSANB(body.html)) bounceHTML = body.html;
+          } catch (err) {
+            this.config.logger.error(err);
+          }
+
           await Promise.all(
             uniqueBounces.map(async bounce => {
               try {
@@ -1500,7 +1523,10 @@ class ForwardEmail {
                       name,
                       bounce,
                       id: session.id,
-                      arrivalDate: session.arrivalDate
+                      arrivalDate: session.arrivalDate,
+                      originalRaw,
+                      messageId,
+                      bounceHTML
                     })
                   )
                 });
